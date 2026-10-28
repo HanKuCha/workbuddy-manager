@@ -1,0 +1,642 @@
+diff --git a/internal/pool/cooldown.go b/internal/pool/cooldown.go
+index df0ed43..795e7f5 100644
+--- a/internal/pool/cooldown.go
++++ b/internal/pool/cooldown.go
+@@ -115,9 +115,9 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
+ //
+ // 语义与 6004 正交：6004 是「模型被限流、对齐重置墙钟」，本入口是「官方确定该后端无此模型、
+ // 重试无意义，只能换模型/换账号」。退避按 reference model_blocks.py 口径（吸收语义、不抄实现）：
+-//   - 首次命中 TTL = modelBlockBaseTTL（6h）；
++//   - 首次命中 TTL = modelBlockBaseTTL（2m）；
+ //   - 半开到期后允许放行重试；再次命中 Hits++ → TTL = base × 2^min(hits-1, modelBlockShift)；
+-//   - 封顶 modelBlockMaxTTL（24h，最多一天再试一次）；
++//   - 封顶 modelBlockMaxTTL（10m）；
+ //   - 该模型请求成功即由 BlockModelClear 清除（注意：6004 的 NoteSuccess 不清 modelCooldowns，
+ //     故清理必须由 handler 在成功且 model 命中 11102 条目时显式调用，见 BlockModelClear）。
+ //
+diff --git a/internal/pool/entry.go b/internal/pool/entry.go
+index 6c5edf9..d5062ab 100644
+--- a/internal/pool/entry.go
++++ b/internal/pool/entry.go
+@@ -51,19 +51,19 @@ type Status struct {
+ 	// 仅 modelCostTTL 内的有效观测，每模型一行（cost_per_1k + last_seen +
+ 	// samples）；无观测/全部过期 → nil（tier 1 未知层）。过期即消失（零回归，
+ 	// 只读遍历零风险）。tier 不单独落字段（可由 per1k≤0 推出，零冗余）。
+-	ModelCosts []ModelCostStatus `json:"model_costs,omitempty"`
+-	Disabled          bool               `json:"disabled"`
+-	DisabledReason    string             `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
++	ModelCosts     []ModelCostStatus `json:"model_costs,omitempty"`
++	Disabled       bool              `json:"disabled"`
++	DisabledReason string            `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
+ 	// ManualDisabled 运维手动停用（issue #138/#118）——与 disabled **并列独立**，
+ 	// 叠加态分别透出不合并（面板据此区分「系统判定坏了」与「我主动摘的」，
+ 	// 两种可用操作不同：前者可 revive，后者该 enable）。
+ 	// 零值也显式写出（运维口径，同 consecutive_fails：缺失会让人误以为"没记录"）。
+-	ManualDisabled bool   `json:"manual_disabled"`
+-	ManualReason   string `json:"manual_reason,omitempty"` // 仅手动停用：停用原因（运维可见）
+-	SuccessCount      int64              `json:"success_count,omitempty"`
+-	ErrTotal          int64              `json:"err_total,omitempty"`
+-	LastSuccessTime   time.Time          `json:"last_success,omitempty"`
+-	LastErrTime       time.Time          `json:"last_err,omitempty"`
++	ManualDisabled  bool      `json:"manual_disabled"`
++	ManualReason    string    `json:"manual_reason,omitempty"` // 仅手动停用：停用原因（运维可见）
++	SuccessCount    int64     `json:"success_count,omitempty"`
++	ErrTotal        int64     `json:"err_total,omitempty"`
++	LastSuccessTime time.Time `json:"last_success,omitempty"`
++	LastErrTime     time.Time `json:"last_err,omitempty"`
+ 	// ConsecutiveFails 连续失败计数（连败降权用，见 entry.consecutiveFails）。
+ 	// 零值也透出（运维口径：与 err_total/session_dead_fails 一致，零值缺失会让人
+ 	// 误以为"没记录"，实际是零值被 omitempty 省略）。
+@@ -111,23 +111,23 @@ type entry struct {
+ 	// 签到之间第四因子（weightOf ×8）不应失忆——签到 09:00/21:00 定期刷新，
+ 	// 窗口外重启会丢快过期积分偏好，可能让奖励积分到期作废。
+ 	creditsExpiring int64
+-	successCount    int64     // 累计成功
++	successCount    int64 // 累计成功
+ 	// errTotal 累计错误（终身累计，仅状态展示用；选号权重不消费——原「成功率」
+ 	// 因子已删，见 pick.weightOf 注释与 success-ema-review）。
+-	errTotal    int64         // 累计错误（终身累计，供状态展示；选号权重不消费，原成功率因子已删）
+-	lastErr     time.Time     // 最近一次错误时间
+-	lastSuccess     time.Time // 最近一次成功时间
+-	coolKind        CoolKind
+-	until           time.Time // 冷却截止（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）
+-	disabled        bool
+-	reason          string
++	errTotal    int64     // 累计错误（终身累计，供状态展示；选号权重不消费，原成功率因子已删）
++	lastErr     time.Time // 最近一次错误时间
++	lastSuccess time.Time // 最近一次成功时间
++	coolKind    CoolKind
++	until       time.Time // 冷却截止（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）
++	disabled    bool
++	reason      string
+ 	// manualDisabled 运维手动停用（issue #138/#118）：与 disabled 并列的独立状态位。
+ 	// 语义是「对话流量摘除」而非「账号冻结」——停用期间签到/token 保活/排程照常执行，
+ 	// 凭证与积分都是活的，只是不参与选号。与 disabled 各自独立清除，两位都清才回池。
+ 	// 持久化（stateAccount.ManualDisabled）：重启保留运维意图。
+ 	manualDisabled bool
+ 	manualReason   string
+-	lastUsed        time.Time // 最近被选中时刻（防并发撞号）
++	lastUsed       time.Time // 最近被选中时刻（防并发撞号）
+ 	// usedSeq 单调递增的选中序号：每次被 pick 选中时取 p.pickSeq 自增值。
+ 	// Windows 等平台 time.Now() 精度有限（~0.5ms），高并发/快速连续选号时多个
+ 	// 账号 lastUsed 完全相等，基于 wall-clock 的 LRU/防惊群判定失效（高并发/低精度时钟下：
+@@ -277,7 +277,7 @@ func (e *entry) healthyForModel(now time.Time, reqModel string) bool {
+ // 从不回收——即「map 只增不减」。而 entry.modelCost 的注释明确声称
+ // 「落盘/恢复按 modelCostTTL 惰性过滤，陈旧观测不复活（同 modelCooldowns 口径）」，
+ // 模型级冷却表正是靠 pruneExpiredModelCooldowns 在 pick 写锁路径做真正删除的
+-//（见 pick.go「map 不无限膨胀」）。两者口径不一致：一旦某模型的观测过期，它就会
++// （见 pick.go「map 不无限膨胀」）。两者口径不一致：一旦某模型的观测过期，它就会
+ // 永久占据一条内存（进程重启才清），并在后续每一轮 pick 的遍历、每次 status 遍历里
+ // 被反复判定为过期（只是没人删）。
+ //
+@@ -345,17 +345,17 @@ func (e *entry) fallbackKind(now time.Time) string {
+ 
+ // stateAccount 单个账号的持久化状态（JSON tag 全小写下划线，向后兼容：缺字段零值）。
+ type stateAccount struct {
+-	Credits      int64     `json:"credits"`
+-	Disabled     bool      `json:"disabled"`
+-	Reason       string    `json:"reason,omitempty"`
++	Credits  int64  `json:"credits"`
++	Disabled bool   `json:"disabled"`
++	Reason   string `json:"reason,omitempty"`
+ 	// ManualDisabled 运维手动停用（issue #138/#118）。持久化——重启保留运维意图，
+ 	// 这也正是该功能要解决的痛点之一（旧权宜做法改 state.json 会被 5s flush 覆盖，
+ 	// 入口化后无需再碰文件）。零值也显式写出（运维口径，同 err_total 注释）。
+-	ManualDisabled bool   `json:"manual_disabled"`
+-	ManualReason   string `json:"manual_reason,omitempty"`
+-	Until        time.Time `json:"until,omitempty"`
+-	CoolKind     CoolKind  `json:"cool_kind"`
+-	SuccessCount int64     `json:"success_count,omitempty"`
++	ManualDisabled bool      `json:"manual_disabled"`
++	ManualReason   string    `json:"manual_reason,omitempty"`
++	Until          time.Time `json:"until,omitempty"`
++	CoolKind       CoolKind  `json:"cool_kind"`
++	SuccessCount   int64     `json:"success_count,omitempty"`
+ 	// err_total 累计错误计数。旧版 err_count（连续错误）仍可读：加载时映射到 err_total，
+ 	// 仅作一次性迁移，不再回写 err_count。
+ 	// 运维可见的运行态计数（err_total/soft_streak/session_dead_fails/credits_expiring）
+@@ -442,7 +442,7 @@ type modelCostEntry struct {
+ // 在 2f4c77b 加上持久化后未同步更新，与上方 stateModelCooldown 的「落盘/恢复往返无损」自相矛盾。
+ // 承载两种「该模型在此账号上不可用」语义：
+ //   - 6004 模型级限流：Until 对齐上游重置墙钟；ResetAt 记录权威恢复时刻。
+-//   - 11102 该后端无此模型：Until 为指数退避 TTL（6h 起、封顶 24h）；Hits 记录
++//   - 11102 该后端无此模型：Until 为指数退避 TTL（2m 起、封顶 10m）；Hits 记录
+ //     累计命中次数驱动退避（6004 无 hits 概念，Hits 恒 0）。
+ type modelCooldown struct {
+ 	// Until 该模型的冷却截止（6004：now+min(resetAt-now, soft_rate_max)；11102：now+退避 TTL）。
+@@ -454,7 +454,7 @@ type modelCooldown struct {
+ 	// Reason 触发原因（透出运维可读文案，同 Status.Reason）。
+ 	Reason string
+ 	// Hits 11102 负缓存的累计命中次数（驱动指数退避）。运行态不落盘（同 modelCost 口径：
+-	// 重启后从 6h 基数重新学习）；6004 条目 Hits 恒 0。持久化来回不会写入该字段。
++	// 重启后从 2m 基数重新学习）；6004 条目 Hits 恒 0。持久化来回不会写入该字段。
+ 	Hits int
+ }
+ 
+@@ -475,12 +475,12 @@ const (
+ const defaultSoftRateMax = 2 * time.Hour
+ 
+ // 11102「该后端无此模型」负缓存的退避参数（吸收 model_blocks.py 语义，复用 modelCooldowns
+-// 机制承载）。首次命中冷却 6h，半开到期放行重试；再命中按 Hits 指数退避（×2^min(hits-1,6)），
+-// 封顶 24h（最多一天再试一次）；该模型请求成功即清。6004 限流不参与本退避（各自独立语义）。
++// 机制承载）。首次命中冷却 2m，半开到期放行重试；再命中按 Hits 指数退避（×2^min(hits-1,6)），
++// 封顶 10m；该模型请求成功即清。6004 限流不参与本退避（各自独立语义）。
+ const (
+-	modelBlockBaseTTL = 6 * time.Hour
+-	modelBlockMaxTTL  = 24 * time.Hour
+-	modelBlockShift   = 6 // 2^6=64 倍后封顶：6h×64>24h，实际封顶锚定 24h
++	modelBlockBaseTTL = 2 * time.Minute
++	modelBlockMaxTTL  = 10 * time.Minute
++	modelBlockShift   = 6 // 2^6=64 倍后封顶：2m×64>10m，实际封顶锚定 10m
+ )
+ 
+ // sessionDeadThreshold 连续 ErrSessionDead（12153）达到该次数才永久禁用。
+diff --git a/internal/pool/modelcooldown_test.go b/internal/pool/modelcooldown_test.go
+index 5fb8dbd..500fe8d 100644
+--- a/internal/pool/modelcooldown_test.go
++++ b/internal/pool/modelcooldown_test.go
+@@ -681,7 +681,7 @@ func TestBlockModelBackoffCooledAndExempt(t *testing.T) {
+ 	}
+ }
+ 
+-// TestBlockModelBackoffExponentialTtl 11102 退避：首次 6h、二次 12h、封顶 24h。
++// TestBlockModelBackoffExponentialTtl 11102 退避：首次 2m、二次 4m、封顶 10m。
+ func TestBlockModelBackoffExponentialTtl(t *testing.T) {
+ 	p := New("")
+ 	p.Add(&auth.Auth{UID: "u1"})
+@@ -691,7 +691,7 @@ func TestBlockModelBackoffExponentialTtl(t *testing.T) {
+ 	first := time.Until(p.byUID["u1"].modelCooldowns["m"].Until)
+ 	p.mu.RUnlock()
+ 	if d := first - modelBlockBaseTTL; d > time.Second || d < -time.Second {
+-		t.Errorf("首次 TTL=%v want ~6h", first)
++		t.Errorf("首次 TTL=%v want ~2m", first)
+ 	}
+ 
+ 	p.BlockModelBackoff("u1", "m", "11102 model not available")
+@@ -703,11 +703,11 @@ func TestBlockModelBackoffExponentialTtl(t *testing.T) {
+ 	if hits != 2 {
+ 		t.Errorf("hits=%d want 2", hits)
+ 	}
+-	if d := second - 12*time.Hour; d > time.Second || d < -time.Second {
+-		t.Errorf("二次 TTL=%v want ~12h", second)
++	if d := second - 4*time.Minute; d > time.Second || d < -time.Second {
++		t.Errorf("二次 TTL=%v want ~4m", second)
+ 	}
+ 
+-	// 连打到远超封顶：TTL 封顶 24h。
++	// 连打到远超封顶：TTL 封顶 10m。
+ 	for i := 0; i < 10; i++ {
+ 		p.BlockModelBackoff("u1", "m", "11102 model not available")
+ 	}
+@@ -715,7 +715,7 @@ func TestBlockModelBackoffExponentialTtl(t *testing.T) {
+ 	capped := time.Until(p.byUID["u1"].modelCooldowns["m"].Until)
+ 	p.mu.RUnlock()
+ 	if d := capped - modelBlockMaxTTL; d > time.Second || d < -time.Second {
+-		t.Errorf("封顶 TTL=%v want ~24h", capped)
++		t.Errorf("封顶 TTL=%v want ~10m", capped)
+ 	}
+ }
+ 
+diff --git a/internal/server/admin.go b/internal/server/admin.go
+index 929f359..7695303 100644
+--- a/internal/server/admin.go
++++ b/internal/server/admin.go
+@@ -122,6 +122,26 @@ func (h *Handler) adminAccountRevive(w http.ResponseWriter, r *http.Request) {
+ 	})
+ }
+ 
++// adminModelAvailable 接受管理端的成功探测，只解除该账号该模型的 11102 负缓存。
++// 小请求成功不能证明真实 6004 token 配额已恢复，因此不清除 6004 或账号级状态。
++func (h *Handler) adminModelAvailable(w http.ResponseWriter, r *http.Request) {
++	uid, ok := adminUID(w, r)
++	if !ok {
++		return
++	}
++	if _, _, found := h.cfg.Pool.ManualDisabledState(uid); !found {
++		writeOpenAIError(w, http.StatusNotFound, "not_found", "account not found")
++		return
++	}
++	model := strings.TrimSpace(r.PathValue("model"))
++	if model == "" || len(model) > 120 {
++		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "model is required")
++		return
++	}
++	h.cfg.Pool.BlockModelClear(uid, model)
++	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "model": model})
++}
++
+ // accountAutoDisabled 读某账号当前的自动禁用位（供响应回显）。
+ // 复用 Pool.List 的单账号查询：轮询全部账号在小池下开销可忽略，
+ // 且避免为此在 pool 上再开一个只读访问器（保持接口面最小）。
+diff --git a/internal/server/channel_check_test.go b/internal/server/channel_check_test.go
+index d81a9fc..847687d 100644
+--- a/internal/server/channel_check_test.go
++++ b/internal/server/channel_check_test.go
+@@ -79,8 +79,7 @@ func TestChatFallsBackToConsoleOnChannelCheck(t *testing.T) {
+ }
+ 
+ func TestChatChannelCheckNeverDisables(t *testing.T) {
+-	// 两条路径都被渠道校验拒：软冷却（退出轮换、别被反复选中），但**不禁用** ——
+-	// 禁用会写「需重新登录」，把用户指向错误的排查方向（凭证是好的）。
++	// 两条路径都被拒时透传本次请求错误，不冷却或禁用整个账号。
+ 	up := &upstream.Client{
+ 		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+ 			return sseResponse(400, channelCheckBody()), nil
+@@ -98,11 +97,8 @@ func TestChatChannelCheckNeverDisables(t *testing.T) {
+ 	if st.Disabled {
+ 		t.Fatalf("渠道校验**绝不能**禁用账号（用户报告的症状）：reason=%q", st.DisabledReason)
+ 	}
+-	if !st.Cooling || st.CoolKind != "soft_rate" {
+-		t.Fatalf("两条路径都被拒时应软冷却让它退出轮换：%+v", st)
+-	}
+-	if !strings.Contains(st.Reason, "channel check") {
+-		t.Errorf("冷却原因应写明是渠道校验，便于排障：%q", st.Reason)
++	if st.Cooling || rec.Code != http.StatusBadRequest {
++		t.Fatalf("渠道拒绝应仅影响当前请求：status=%d account=%+v", rec.Code, st)
+ 	}
+ }
+ 
+diff --git a/internal/server/channel_request_scope_test.go b/internal/server/channel_request_scope_test.go
+new file mode 100644
+index 0000000..15b79d1
+--- /dev/null
++++ b/internal/server/channel_request_scope_test.go
+@@ -0,0 +1,45 @@
++package server
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"workbuddy2api/internal/auth"
++	"workbuddy2api/internal/upstream"
++)
++
++func TestChannelRejectionIsRequestScoped(t *testing.T) {
++	for _, consoleMissing := range []bool{true, false} {
++		t.Run(map[bool]string{true: "console-missing", false: "both-rejected"}[consoleMissing], func(t *testing.T) {
++			accounts := map[string]bool{}
++			calls := 0
++			up := &upstream.Client{HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
++				calls++
++				accounts[r.Header.Get("X-User-Id")] = true
++				if consoleMissing && strings.Contains(r.URL.Path, "/console/") {
++					return sseResponse(400, `{"code":11102,"msg":"model [deepseek-v4.1-flash] service info not found"}`), nil
++				}
++				return sseResponse(400, channelCheckBody()), nil
++			})}, ChatBaseCN: "https://test.invalid"}
++			p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "a", ExpiresAt: 9999999999},
++				&auth.Auth{UID: "u2", AccessToken: "b", ExpiresAt: 9999999999})
++			h := NewHandler(Config{Pool: p, Upstream: up})
++			rec := httptest.NewRecorder()
++			h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(
++				`{"model":"deepseek-v4.1-flash","stream":true,"messages":[{"role":"user","content":"hi"}]}`)))
++			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "11128") {
++				t.Fatalf("must expose original channel rejection: status=%d body=%s", rec.Code, rec.Body.String())
++			}
++			if len(accounts) != 1 || calls > 3 {
++				t.Fatalf("must not rotate the rejected request across accounts: accounts=%v calls=%d", accounts, calls)
++			}
++			for _, st := range p.List() {
++				if st.Cooling || st.Disabled || st.ConsecutiveFails != 0 || len(st.RateLimitedModels) != 0 || st.InFlight != 0 {
++					t.Fatalf("request rejection must not mutate account availability: %+v", st)
++				}
++			}
++		})
++	}
++}
+diff --git a/internal/server/handler.go b/internal/server/handler.go
+index c198049..f109267 100644
+--- a/internal/server/handler.go
++++ b/internal/server/handler.go
+@@ -118,6 +118,7 @@ func NewHandler(cfg Config) *Handler {
+ 		h.mux.HandleFunc("POST /admin/accounts/{uid}/disable", h.withAuth(h.adminAccountDisable))
+ 		h.mux.HandleFunc("POST /admin/accounts/{uid}/enable", h.withAuth(h.adminAccountEnable))
+ 		h.mux.HandleFunc("POST /admin/accounts/{uid}/revive", h.withAuth(h.adminAccountRevive))
++		h.mux.HandleFunc("POST /admin/accounts/{uid}/models/{model}/available", h.withAuth(h.adminModelAvailable))
+ 	}
+ 	h.mux.HandleFunc("GET /healthz", h.healthz)
+ 	return h
+@@ -781,6 +782,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
+ 				kind = upstream.Classify(status, string(respBody))
+ 				uerr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
+ 			}
++			// 渠道校验是本次请求被拒，不能据此给整个账号写 10 分钟冷却。
++			// 保留原始拒绝并停止换号，避免同一报文连坐整个账号池。
++			if upstream.IsChannelCheck(string(respBody)) {
++				fail(acct.UID)
++				writeOpenAIErrorHint(w, status, "channel_check_rejected", string(respBody),
++					"upstream channel verification rejected this request; account availability is unchanged")
++				return
++			}
+ 			// 内容拦截误报（passthrough/append 模式首遇）：判定为 system 指纹误报，
+ 			// 触发降级到次日 00:00 CST，换 Degraded 中性提示词同请求内重试（append
+ 			// 降级重试同样退化为 replace——原文在场只会确定性再撞 400）。
+@@ -1202,8 +1211,7 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
+ 		// 上游层已先做过换路径兜底（/v2 → /console，见 upstream.chatPaths）；两条都被
+ 		// 拒才走到这里：软冷却让它退出轮换（别被反复选中），但**不清凭证、不标禁用**。
+ 		if upstream.IsChannelCheck(body) {
+-			h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown,
+-				"channel check ("+upstreamCodeLabel(body, uerr)+")")
++			// chatCompletions 已直接透传；防御调用同样不罚账号。
+ 			return
+ 		}
+ 		if strings.Contains(lowerBody, "request illegal") {
+@@ -1251,8 +1259,8 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
+ 		// 十几个号轮一圈就把整池打满，对外变成 503 no_healthy_account。
+ 	case upstream.ErrModelBlocked:
+ 		// 11102「该后端无此模型」：(账号, 模型) 负缓存避让。复用 modelCooldowns 机制
+-		// （与 6004 同域），写 modelCooldowns[model]，Until 为指数退避 TTL（6h 起、封顶
+-		// 24h）。选号侧 healthyForModel 对该账号自动避开该模型；切模型/切账号即可用。
++		// （与 6004 同域），写 modelCooldowns[model]，Until 为指数退避 TTL（2m 起、封顶
++		// 10m）。选号侧 healthyForModel 对该账号自动避开该模型；切模型/切账号即可用。
+ 		// 立即换号（本轮 continue），该账号该模型冷却，下次选号避开。
+ 		h.cfg.Pool.BlockModelBackoff(uid, model, upstream.ModelBlockReason)
+ 	default:
+diff --git a/internal/server/model_recovery_test.go b/internal/server/model_recovery_test.go
+new file mode 100644
+index 0000000..2fe40e8
+--- /dev/null
++++ b/internal/server/model_recovery_test.go
+@@ -0,0 +1,48 @@
++package server
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++
++	"workbuddy2api/internal/auth"
++)
++
++func TestSuccessfulProbeClearsOnlyMissingModel(t *testing.T) {
++	p := testPoolWith(&auth.Auth{UID: "u1"})
++	p.BlockModelBackoff("u1", "deepseek-v4.1-flash", "11102 model not available")
++	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(time.Hour), "glm-5.3", "6004 model rate limit")
++	p.SetManualDisabled("u1", true, "operator")
++	h := NewHandler(Config{Pool: p, APIKey: "test", AdminEnabled: true})
++	url := "/admin/accounts/u1/models/deepseek-v4.1-flash/available"
++	request := httptest.NewRequest("POST", url, nil)
++	rec := httptest.NewRecorder()
++	h.ServeHTTP(rec, request)
++	if rec.Code != http.StatusUnauthorized {
++		t.Fatalf("recovery requires gateway key: %d", rec.Code)
++	}
++	request = httptest.NewRequest("POST", url, nil)
++	request.Header.Set("Authorization", "Bearer test")
++	rec = httptest.NewRecorder()
++	h.ServeHTTP(rec, request)
++	if rec.Code != http.StatusOK {
++		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
++	}
++	st, _ := p.Status("u1")
++	if !st.ManualDisabled || len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" {
++		t.Fatalf("must preserve real quota and operator state: %+v", st)
++	}
++}
++
++func TestProbeRecoveryDoesNotClearSameModelQuota(t *testing.T) {
++	p := testPoolWith(&auth.Auth{UID: "u1"})
++	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(time.Hour), "deepseek-v4.1-flash", "6004 model rate limit")
++	h := NewHandler(Config{Pool: p, AdminEnabled: true})
++	rec := httptest.NewRecorder()
++	h.ServeHTTP(rec, httptest.NewRequest("POST", "/admin/accounts/u1/models/deepseek-v4.1-flash/available", nil))
++	st, _ := p.Status("u1")
++	if rec.Code != http.StatusOK || len(st.RateLimitedModels) != 1 {
++		t.Fatalf("successful small probe must not erase token quota: %d %+v", rec.Code, st)
++	}
++}
+diff --git a/internal/upstream/client.go b/internal/upstream/client.go
+index 0e5efd6..29a3ff7 100644
+--- a/internal/upstream/client.go
++++ b/internal/upstream/client.go
+@@ -1255,6 +1255,8 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
+ 	// （issue #296：上游报文明确写着「请求被拦截，请重新发送」，说明它期望
+ 	// 客户端重试；灰度校验有概率性，同一请求重发一次常能通过）。
+ 	channelRetried := false
++	var primaryChannelRaw []byte
++	var primaryChannelErr *Error
+ 	for i := 0; i < len(paths); i++ {
+ 		path := paths[i]
+ 		url := c.chatBase(a) + path
+@@ -1306,17 +1308,23 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
+ 				continue
+ 			}
+ 			kind := Classify(resp.StatusCode, string(raw))
+-			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
+-				logfmt.Label(a.UID, a.Nickname), resp.StatusCode, kind, truncate(string(raw), 200))
++			log.Printf("WARN: [upstream] chat_stream acct=%s path=%s: upstream %d %s body=%s",
++				logfmt.Label(a.UID, a.Nickname), path, resp.StatusCode, kind, truncate(string(raw), 2048))
+ 			// 回退路径上的 11102 降级（issue #245）：能走到 /console 是因为 /v2 判了渠道
+ 			// 校验，而 /console 本来就可能不提供这个模型 —— 11102 只说明「这条路径没有」，
+ 			// 不是「该账号缺这个模型」。照 ErrModelBlocked 处理，handler 会写 (账号,模型)
+ 			// 6 小时负缓存，逐个账号轮过去就是整池 503 no_healthy_account，比不换路径更糟。
+ 			// 也不按 ErrClient 处理：连败计数是账号健康信号，这里失败的是路径不是账号。
+-			if i > 0 && kind == ErrModelBlocked {
++			if path == chatConsolePath && kind == ErrModelBlocked {
+ 				log.Printf("WARN: [upstream] chat_stream acct=%s: 回退路径 %s 报 %s，按请求级处理（不写模型冷却）",
+ 					logfmt.Label(a.UID, a.Nickname), path, kind)
+ 				kind = ErrFallbackModelMissing
++				if i < len(paths)-1 {
++					continue
++				}
++				if primaryChannelErr != nil {
++					return nil, primaryChannelErr.Status, primaryChannelRaw, primaryChannelErr
++				}
+ 			}
+ 			// 路径级拒绝 → 换下一个候选路径再试，**不**把它当账号问题。
+ 			//   · 渠道校验（11128/11-128）：/v2 新增强校验，/console 放行（见 chatPaths）；
+@@ -1327,6 +1335,10 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
+ 			// 失败仍按下面原有逻辑返回，由 handler 决定怎么罚号 —— 那时也**不该禁用**
+ 			// （见 handler 的 ErrAccountFault 分支）。
+ 			if IsChannelCheck(string(raw)) {
++				if path == chatCompletionsPath {
++					primaryChannelRaw = raw
++					primaryChannelErr = &Error{Kind: kind, Status: resp.StatusCode, Msg: string(raw)}
++				}
+ 				// 记下这个账号被渠道校验拦过：后续请求优先走 /console（issue #296），
+ 				// 不必每次都先撞一次 /v2。TTL 到期自动回落，上游策略变化后不会卡在
+ 				// 次优路径上。
+diff --git a/internal/upstream/console_preferred_recovery_test.go b/internal/upstream/console_preferred_recovery_test.go
+new file mode 100644
+index 0000000..8c490f6
+--- /dev/null
++++ b/internal/upstream/console_preferred_recovery_test.go
+@@ -0,0 +1,56 @@
++package upstream
++
++import (
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"reflect"
++	"testing"
++
++	"workbuddy2api/internal/auth"
++)
++
++func TestConsolePreferredModelMissingRetriesPrimary(t *testing.T) {
++	var paths []string
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		paths = append(paths, r.URL.Path)
++		if r.URL.Path == chatConsolePath {
++			w.WriteHeader(http.StatusBadRequest)
++			io.WriteString(w, `{"code":11102,"msg":"model [deepseek-v4.1-flash] service info not found"}`)
++			return
++		}
++		io.WriteString(w, "data: [DONE]\n\n")
++	}))
++	defer srv.Close()
++	c := New()
++	c.ChatBaseCN = srv.URL
++	c.markChannelBlocked("u1")
++	a := &auth.Auth{UID: "u1", AccessToken: "test", ExpiresAt: 9999999999}
++	rc, status, raw, err := c.ChatStream(a, []byte(`{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}`), "", ChatMeta{})
++	if rc != nil {
++		rc.Close()
++	}
++	if err != nil || status != http.StatusOK {
++		t.Fatalf("primary remained usable: status=%d raw=%s err=%v", status, raw, err)
++	}
++	if !reflect.DeepEqual(paths, []string{chatConsolePath, chatCompletionsPath}) {
++		t.Fatalf("paths=%v", paths)
++	}
++}
++
++func TestConsolePreferredKeepsPrimaryModelError(t *testing.T) {
++	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.WriteHeader(http.StatusBadRequest)
++		io.WriteString(w, `{"code":11102,"msg":"model [deepseek-v4.1-flash] service info not found"}`)
++	}))
++	defer srv.Close()
++	c := New()
++	c.ChatBaseCN = srv.URL
++	c.markChannelBlocked("u1")
++	a := &auth.Auth{UID: "u1", AccessToken: "test", ExpiresAt: 9999999999}
++	_, _, _, err := c.ChatStream(a, []byte(`{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}`), "", ChatMeta{})
++	ue, ok := err.(*Error)
++	if !ok || ue.Kind != ErrModelBlocked {
++		t.Fatalf("primary 11102 must remain model_blocked: %v", err)
++	}
++}
+diff --git a/internal/upstream/fallback_model_missing_test.go b/internal/upstream/fallback_model_missing_test.go
+index c170a35..a3f518b 100644
+--- a/internal/upstream/fallback_model_missing_test.go
++++ b/internal/upstream/fallback_model_missing_test.go
+@@ -43,8 +43,8 @@ func TestConsoleFallbackModelMissingIsRequestLevel(t *testing.T) {
+ 	if !ok {
+ 		t.Fatalf("应返回分类信封，got %T (%v)", err, err)
+ 	}
+-	if ue.Kind != ErrFallbackModelMissing {
+-		t.Fatalf("回退路径的 11102 应归请求级（ErrFallbackModelMissing），got %v", ue.Kind)
++	if ue.Kind != ErrAccountFault || string(raw) != channelBody {
++		t.Fatalf("应保留主路径的渠道拒绝，不让备用路径缺模型覆盖原始原因，got %v raw=%s", ue.Kind, raw)
+ 	}
+ 	if len(paths) != 2 || !strings.Contains(paths[0], "/v2/") || !strings.Contains(paths[1], "/console/") {
+ 		t.Fatalf("应当先在 /v2 被拒再换 /console，实际路径=%v", paths)
+diff --git a/internal/upstream/path_metadata_compat_test.go b/internal/upstream/path_metadata_compat_test.go
+new file mode 100644
+index 0000000..e190bdb
+--- /dev/null
++++ b/internal/upstream/path_metadata_compat_test.go
+@@ -0,0 +1,51 @@
++package upstream
++
++import (
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"workbuddy2api/internal/auth"
++)
++
++const pathMetadataOriginal = "Tokens prefixed with @ are paths the user explicitly referenced. Relative paths resolve from the workspace root; absolute paths identify files or directories on the host."
++const pathMetadataCompatible = "Tokens prefixed with @ are paths the user explicitly referenced. Resolve relative paths from the workspace root; absolute paths identify files or directories on the host."
++
++func TestPathMetadataCompatibilityOnWire(t *testing.T) {
++	for _, enabled := range []bool{false, true} {
++		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++			body, _ := io.ReadAll(r.Body)
++			wanted := pathMetadataOriginal
++			if enabled {
++				wanted = pathMetadataCompatible
++			}
++			if !strings.Contains(string(body), wanted) || !strings.Contains(string(body), "Keep other instructions.") || !strings.Contains(string(body), "ordinary user text") {
++				t.Errorf("enabled=%v: request lost metadata or surrounding content: %s", enabled, body)
++			}
++			io.WriteString(w, "data: [DONE]\n\n")
++		}))
++		c := New()
++		c.ChatBaseCN = srv.URL
++		c.SanitizeFingerprints = enabled
++		a := &auth.Auth{UID: "u1", AccessToken: "test", ExpiresAt: 9999999999}
++		body := `{"model":"deepseek-v4.1-flash","messages":[{"role":"system","content":"Keep other instructions. ` + pathMetadataOriginal + `"},{"role":"user","content":"ordinary user text"}]}`
++		rc, _, _, err := c.ChatStream(a, []byte(body), "", ChatMeta{})
++		if err != nil {
++			t.Fatal(err)
++		}
++		rc.Close()
++		srv.Close()
++	}
++}
++
++func TestPathMetadataRequiresCompleteParagraph(t *testing.T) {
++	short := "Relative paths resolve from the workspace root; absolute paths identify files or directories on the host."
++	if got := sanitizeText(short); got != short {
++		t.Fatalf("ordinary path sentence changed: %q", got)
++	}
++	if got := sanitizeText(pathMetadataOriginal); got != pathMetadataCompatible || sanitizeText(got) != got {
++		t.Fatalf("complete template must be rewritten once: %q", got)
++	}
++}
+diff --git a/internal/upstream/sanitize.go b/internal/upstream/sanitize.go
+index d16506b..0cf6699 100644
+--- a/internal/upstream/sanitize.go
++++ b/internal/upstream/sanitize.go
+@@ -20,6 +20,7 @@ var sanitizeFeatures = []string{
+ 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
+ 	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
+ 	"11128",                                           // 上游反探测：裸数字错误码
++	"Tokens prefixed with @ are paths the user explicitly referenced.",
+ }
+ 
+ // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
+@@ -48,6 +49,10 @@ var sanitizeKvRe = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`)
+ // 注意仍要求 "You are Claude Code, " 前缀，不做更宽的子串替换，
+ // 以免误伤 TestExactMatchOnlyVariantNotTouched 所保护的零散文本。
+ var sanitizeRewrites = [][2]string{
++	{
++		"Tokens prefixed with @ are paths the user explicitly referenced. Relative paths resolve from the workspace root; absolute paths identify files or directories on the host.",
++		"Tokens prefixed with @ are paths the user explicitly referenced. Resolve relative paths from the workspace root; absolute paths identify files or directories on the host.",
++	},
+ 	{
+ 		"You are Claude Code, Anthropic's official CLI for Claude",
+ 		"You are Claude Code, Anthropic's official CLI tool for Claude",
+diff --git a/internal/upstream/sanitize_test.go b/internal/upstream/sanitize_test.go
+index 1009830..7eddb0f 100644
+--- a/internal/upstream/sanitize_test.go
++++ b/internal/upstream/sanitize_test.go
+@@ -433,6 +433,7 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
+ 		"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
+ 		"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
+ 		"11128",                                           // 上游反探测：裸数字错误码
++		"Tokens prefixed with @ are paths the user explicitly referenced.",
+ 	}
+ 	if len(sanitizeFeatures) != len(features) {
+ 		t.Fatalf("sanitizeFeatures 项数=%d want %d（快照与实现不同步，见测试头注释的验证步骤）", len(sanitizeFeatures), len(features))
+@@ -444,6 +445,10 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
+ 	}
+ 
+ 	rewrites := [][2]string{
++		{
++			"Tokens prefixed with @ are paths the user explicitly referenced. Relative paths resolve from the workspace root; absolute paths identify files or directories on the host.",
++			"Tokens prefixed with @ are paths the user explicitly referenced. Resolve relative paths from the workspace root; absolute paths identify files or directories on the host.",
++		},
+ 		{
+ 			"You are Claude Code, Anthropic's official CLI for Claude",
+ 			"You are Claude Code, Anthropic's official CLI tool for Claude",
