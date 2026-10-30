@@ -20,6 +20,8 @@ BASE = os.environ.get('WB_BASE', 'http://127.0.0.1:7960')
 SHOTS = Path(os.environ.get('WB_SHOTS', str(Path(tempfile.gettempdir()) / 'wb-account-probe-layout')))
 NOW = int(time.time())
 MODELS = ['deepseek-v4.1-flash', 'global:very-long-model-name-' + 'x' * 80] + [f'model-{i:02}' for i in range(22)]
+MODEL_NAMES = dict(zip(MODELS[:6], ('Auto', 'Hy3', 'A', 'B', 'C', 'D')))
+STATUSES = ('ok', 'rate', 'credit', 'auth', 'no_model', 'error')
 ACCOUNTS = [dict(
     file=f'workbuddy-ui-{i}.json', uid=f'ui-{i}', nickname=f'测试账号 {i:02}',
     enterprise_id='', expires_at=NOW + 27 * 86400, remain_seconds=27 * 86400,
@@ -43,6 +45,12 @@ VISIBLE_BADGES = """() => [...document.querySelectorAll('tbody tr')].flatMap(row
       r.top < bounds.top - 1 || r.bottom > bounds.bottom + 1
         ? [badge.textContent] : []);
   });
+})"""
+
+MULTILINE_STATUS = """root => [...root.querySelectorAll('tbody td > span')].flatMap(badge => {
+  const range = document.createRange(); range.selectNodeContents(badge);
+  const lines = new Set([...range.getClientRects()].filter(r => r.width && r.height).map(r => Math.round(r.top)));
+  return lines.size > 1 ? [badge.textContent] : [];
 })"""
 
 
@@ -72,13 +80,18 @@ def main() -> None:
             elif path == '/api/accounts/refresh-credits':
                 data = dict(total=43, succeeded=43, failed=[], credits={}, meta={})
             elif path == '/api/model-catalog':
-                data = dict(models=[dict(id=m, name=m) for m in MODELS])
+                data = dict(models=[dict(id=m, name=MODEL_NAMES.get(m, m)) for m in MODELS])
             elif path == '/api/accounts/probe-models':
                 body = route.request.post_data_json
                 requests.append(body)
-                results = [dict(file=f, model=m, status='ok', message='mock success', gateway_synced=True)
-                           for f in body['accounts'] for m in body['models']]
-                data = dict(results=results, summary=dict(ok=len(results)), requests=len(results))
+                results = []
+                for file in body['accounts']:
+                    for model in body['models']:
+                        status = STATUSES[MODELS.index(model) % len(STATUSES)]
+                        results.append(dict(file=file, model=model, status=status, message='mock ' + status,
+                                            gateway_synced=status == 'ok', gateway_sync_skipped=status != 'ok'))
+                data = dict(results=results, summary={s: sum(r['status'] == s for r in results) for s in STATUSES},
+                            requests=len(results))
             route.fulfill(status=200, content_type='application/json', body=json.dumps(data))
 
         page.route('**/api/**', api)
@@ -146,6 +159,9 @@ def main() -> None:
         assert dialog.locator('thead th').count() == len(MODELS) + 1
         assert dialog.locator('tbody tr').count() == 1
         assert len(requests) == 6  # 24 个模型分为 10 + 10 + 4。
+        assert set(dialog.locator('tbody td > span').all_text_contents()) == {
+            '可用', '模型限流', '额度不足', '凭证失效', '无此模型', '错误',
+        }
         scroller = dialog.locator('table').locator('..')
         assert scroller.evaluate('(e) => e.scrollWidth > e.clientWidth'), '宽结果应在表格内部横向滚动'
         for width in (1440, 768, 390):
@@ -154,6 +170,8 @@ def main() -> None:
             assert bounds and bounds['x'] >= 0 and bounds['x'] + bounds['width'] <= width + 1
             assert dialog.evaluate('(e) => e.scrollWidth <= e.clientWidth + 1'), '弹窗整体不得横向滚动'
             dialog.locator('tbody tr').first.scroll_into_view_if_needed()
+            wrapped = dialog.evaluate(MULTILINE_STATUS)
+            assert not wrapped, f'{width}px: 探测状态不应换行成竖排: {wrapped}'
             for name in ('取消', '开始探测'):
                 rect = dialog.get_by_role('button', name=name, exact=True).bounding_box()
                 assert rect and rect['y'] >= 0 and rect['y'] + rect['height'] <= 844
@@ -161,6 +179,7 @@ def main() -> None:
         assert not errors, errors
         browser.close()
         print('PASS: 多模型结果内部滚动、手机与桌面弹窗及操作按钮保持可见；无运行时错误')
+        print('PASS: Auto / Hy3 等短表头下，六种探测结果在桌面和手机宽度均为横向单行')
         print(f'ALL CHECKS PASSED; screenshots: {SHOTS}')
 
 

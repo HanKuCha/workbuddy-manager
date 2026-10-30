@@ -266,7 +266,7 @@ export function ModelProbeDialog({
                 </span>
                 {STATUS_ORDER.filter((s) => (result.summary[s] ?? 0) > 0).map((s) => (
                   <span key={s}
-                        className={`rounded-full px-2 py-0.5 text-[10px] ${STATUS_STYLE[s]}`}>
+                        className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] ${STATUS_STYLE[s]}`}>
                     {t(STATUS_KEY[s])} {result.summary[s]}
                   </span>
                 ))}
@@ -301,7 +301,7 @@ export function ModelProbeDialog({
                             <td key={m} className="px-1.5 py-1 text-center">
                               {r ? (
                                 <span
-                                  className={`inline-block rounded-full px-2 py-0.5 ${STATUS_STYLE[r.status]}`}
+                                  className={`inline-block whitespace-nowrap rounded-full px-2 py-0.5 ${STATUS_STYLE[r.status]}`}
                                   title={`${t(STATUS_KEY[r.status])}\n${r.message}${r.gateway_sync_message ? `\n${r.gateway_sync_message}` : ''}`}
                                 >
                                   {t(STATUS_KEY[r.status])}
