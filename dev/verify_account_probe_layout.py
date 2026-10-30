@@ -22,6 +22,12 @@ NOW = int(time.time())
 MODELS = ['deepseek-v4.1-flash', 'global:very-long-model-name-' + 'x' * 80] + [f'model-{i:02}' for i in range(22)]
 MODEL_NAMES = dict(zip(MODELS[:6], ('Auto', 'Hy3', 'A', 'B', 'C', 'D')))
 STATUSES = ('ok', 'rate', 'credit', 'auth', 'no_model', 'error')
+CREDIT_META = {
+    f'ui-{i}': dict(cached=i % 2 == 1, cache_age=24 if i % 2 == 1 else None,
+                   expiries=[dict(amount=amount, at=NOW + seconds)])
+    for i, (amount, seconds) in enumerate(((47, 8 * 86400 + 3600), (788, 20 * 86400 + 3600),
+                                         (14, 6 * 3600), (431, 86400 + 3600)))
+}
 ACCOUNTS = [dict(
     file=f'workbuddy-ui-{i}.json', uid=f'ui-{i}', nickname=f'测试账号 {i:02}',
     enterprise_id='', expires_at=NOW + 27 * 86400, remain_seconds=27 * 86400,
@@ -53,6 +59,14 @@ MULTILINE_STATUS = """root => [...root.querySelectorAll('tbody td > span')].flat
   return lines.size > 1 ? [badge.textContent] : [];
 })"""
 
+CREDIT_POSITIONS = """() => [...document.querySelectorAll('span[title]')]
+  .filter(e => /^\\d[\\d,.]*\\s*·/.test(e.textContent.trim()) && e.getBoundingClientRect().width > 0)
+  .map(hint => {
+    const balance = hint.parentElement.querySelector('span[title]');
+    const h = hint.getBoundingClientRect(), b = balance.getBoundingClientRect();
+    return {text: hint.textContent, below: h.top >= b.bottom, aligned: Math.abs(h.left - b.left) < 1};
+  })"""
+
 
 def main() -> None:
     SHOTS.mkdir(parents=True, exist_ok=True)
@@ -78,7 +92,8 @@ def main() -> None:
             elif path == '/api/proxies':
                 data = dict(routes=['test-route'], default='')
             elif path == '/api/accounts/refresh-credits':
-                data = dict(total=43, succeeded=43, failed=[], credits={}, meta={})
+                data = dict(total=43, succeeded=43, failed=[],
+                            credits={f'ui-{i}': 4683 - i * 150 for i in range(5)}, meta=CREDIT_META)
             elif path == '/api/model-catalog':
                 data = dict(models=[dict(id=m, name=MODEL_NAMES.get(m, m)) for m in MODELS])
             elif path == '/api/accounts/probe-models':
@@ -102,6 +117,11 @@ def main() -> None:
             assert not page.evaluate(VISIBLE_BADGES), f'{width}px: 状态文字被裁切'
             assert '小时' in page.locator('tbody tr').first.locator('td').nth(2).inner_text()
             assert page.locator('[data-slot="table-container"]').first.evaluate('(e) => e.scrollWidth <= e.clientWidth + 1')
+            positions = page.evaluate(CREDIT_POSITIONS)
+            assert len(positions) == 4 and all(p['below'] and p['aligned'] for p in positions), f'{width}px: 到期提示位置不一致: {positions}'
+        page.set_viewport_size(dict(width=390, height=844))
+        positions = page.evaluate(CREDIT_POSITIONS)
+        assert len(positions) == 4 and all(p['below'] and p['aligned'] for p in positions), positions
         page.set_viewport_size(dict(width=1440, height=900))
         rows = page.locator('tbody tr')
         for index, label in enumerate(('模型受限', '模型受限 +1', '模型受限 +2', '模型受限 +23')):
@@ -111,6 +131,7 @@ def main() -> None:
         assert rows.nth(2).bounding_box()['height'] == rows.nth(3).bounding_box()['height'], '模型多不能撑高账号行'
         page.screenshot(path=str(SHOTS / 'status.png'))
         print('PASS: 768/1024/1280/1440/1920px 状态文字完整、小时单位可见、表格无横向溢出')
+        print('PASS: 实时/缓存积分及普通/临期/紧急到期提示，在桌面和手机宽度下统一位于余额下方并左对齐')
 
         rows.nth(3).get_by_role('button', name='模型受限 +23', exact=True).click()
         details = page.get_by_role('dialog')

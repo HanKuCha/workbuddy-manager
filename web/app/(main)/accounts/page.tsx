@@ -824,38 +824,38 @@ export default function AccountsPage() {
           ? 'text-amber-600 dark:text-amber-400'
           : 'text-foreground';
     return (
-      // 固定列宽后这一列只有 12%：余额 + 来源徽标 + 到期倒计时挤在一行会**溢出**
-      // 并被下一列裁掉（issue #298 的现场就是「到期信息被 token 有效期列遮挡」）。
-      // 允许换行：空间够时仍是一行，窄窗口下倒计时自动落到第二行，而不是被切掉。
-      <span className="inline-flex max-w-full flex-wrap items-center gap-1.5">
-        <span className={`text-xs font-medium tabular-nums ${tone}`} title={t('accounts.creditsTitle')}>
-          {fmtNumber(value)}
-        </span>
-        {fromSnapshot ? (
-          <span
-            className="rounded-full bg-muted px-1.5 py-0.5 text-[11px] leading-3 text-muted-foreground"
-            title={t('accounts.snapshotTitle')}
-          >
-            {t('accounts.snapshot')}
+      // 余额与来源放在首行，到期提示固定放在下方并左对齐。
+      <span className="inline-flex max-w-full flex-col items-start gap-1.5">
+        <span className="inline-flex max-w-full flex-wrap items-center gap-1.5">
+          <span className={`text-xs font-medium tabular-nums ${tone}`} title={t('accounts.creditsTitle')}>
+            {fmtNumber(value)}
           </span>
-        ) : (
-          meta &&
-          (meta.cached ? (
+          {fromSnapshot ? (
             <span
-              className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] leading-3 text-amber-600 dark:text-amber-400"
-              title={t('accounts.cacheTitle')}
+              className="rounded-full bg-muted px-1.5 py-0.5 text-[11px] leading-3 text-muted-foreground"
+              title={t('accounts.snapshotTitle')}
             >
-              {meta.cache_age != null ? t('accounts.cacheAge', {n: meta.cache_age}) : t('accounts.cache')}
+              {t('accounts.snapshot')}
             </span>
           ) : (
-            <span
-              className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] leading-3 text-emerald-600 dark:text-emerald-400"
-              title={t('accounts.liveTitle')}
-            >
-              {t('accounts.live')}
-            </span>
-          ))
-        )}
+            meta &&
+            (meta.cached ? (
+              <span
+                className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] leading-3 text-amber-600 dark:text-amber-400"
+                title={t('accounts.cacheTitle')}
+              >
+                {meta.cache_age != null ? t('accounts.cacheAge', {n: meta.cache_age}) : t('accounts.cache')}
+              </span>
+            ) : (
+              <span
+                className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] leading-3 text-emerald-600 dark:text-emerald-400"
+                title={t('accounts.liveTitle')}
+              >
+                {t('accounts.live')}
+              </span>
+            ))
+          )}
+        </span>
         <CreditCountdown expiries={fromSnapshot ? undefined : meta?.expiries} />
       </span>
     );
